@@ -1,15 +1,15 @@
 module.exports = function(RED) {
     const QRCode = require('qrcode');
-    const FS = require('node:fs')
+    const FS = require('node:fs');
     const OS = require('os');
     const Path = require('path');
     let userDir = OS.homedir();
     let whatsappLinkDir = Path.join(userDir, '.node-red', 'Whatsapp-Link');
     let whatsappLinkDirSocket = Path.join(whatsappLinkDir, 'WA-Sockets');
-    // let whatsappLinkDirSocketLogs = Path.join(whatsappLinkDir, 'WA-Sockets-logs');
-        
+    let whatsappLinkDirRemote = Path.join(whatsappLinkDir, 'WA-Remote'); // Add this line for the remote client
+
     function RemoteClientNode(n) {
-        RED.nodes.createNode(this,n);
+        RED.nodes.createNode(this, n);
         var WAnode = this;
         var clientType = n.clientType;
         var loopTime = n.loopTime;
@@ -17,19 +17,48 @@ module.exports = function(RED) {
         loopTime = loopTime * 60 * 60 * 1000 || 3600000;
         var onlineStatus = n.onlineStatus;
         var whatsappConnectionStatus;
-        var client
+        var client;
 
-        if (clientType ==="waWebClient"){
+        if (clientType === "waRemoteClient") {
+            const puppeteer = require('puppeteer-core'); // Use puppeteer-core for remote connection
+
+            async function connectRemoteBrowser() {
+                try {
+                    const browser = await puppeteer.connect({
+                        browserWSEndpoint: n.remoteUrl, // URL of the remote WebSocket
+                        defaultViewport: null
+                    });
+                    WAnode.log("Connected to remote Chrome");
+                    return browser;
+                } catch (e) {
+                    WAnode.error("Remote connection error: " + e.message);
+                    throw e;
+                }
+            }
+
             const { Client, LocalAuth } = require('whatsapp-web.js');
-            
-            var WAConnect = function(){
+            client = new Client({
+                authStrategy: new LocalAuth({ dataPath: whatsappLinkDirRemote }),
+                puppeteer: {
+                    browser: await connectRemoteBrowser() // Connect to the remote browser
+                }
+            });
+
+            client.initialize();
+            // ... (reuse the rest of the code from waWebClient)
+        }
+
+        if (clientType === "waWebClient") {
+            const { Client, LocalAuth } = require('whatsapp-web.js');
+
+            var WAConnect = function() {
                 const webClient = new Client({
-                    authStrategy : new LocalAuth({
-                        dataPath : whatsappLinkDir
+                    authStrategy: new LocalAuth({
+                        dataPath: whatsappLinkDir
                     }),
-                    puppeteer : {
-                        headless : true,
-                        args : ['--no-sandbox', 
+                    puppeteer: {
+                        headless: true,
+                        args: ['--no-sandbox',
                             '--disable-setuid-sandbox',
                             '--user-data-dir=' + WAnode.id
                         ]
@@ -39,68 +68,64 @@ module.exports = function(RED) {
                 try {
                     webClient.initialize();
                     WAnode.log("Status : Initializing Whatsapp..");
-                }
-                catch(e) {
+                } catch (e) {
                     WAnode.log(`Error : Unable to start Whatsapp. Try Again..`);
-                };
-                return webClient ;
+                }
+                return webClient;
             };
             client = WAConnect();
 
-            async function pressenceUpdate(OLS){
+            async function pressenceUpdate(OLS) {
                 try {
-                    if (!OLS){
+                    if (!OLS) {
                         await client.sendPresenceUnavailable();
-                        WAnode.log(`Whatsapp marked as Offline`)
+                        WAnode.log(`Whatsapp marked as Offline`);
                     } else {
                         await client.sendPresenceAvailable();
                     }
-                } catch (e){
-                    WAnode.error("Error at pressence : " + e)
+                } catch (e) {
+                    WAnode.error("Error at pressence : " + e);
                 }
             }
-            
-            function WAClose(){
-                try { 
+
+            function WAClose() {
+                try {
                     client.destroy();
+                } catch (e) {
+                    WAnode.err(`Error : Too many instructions! Try again.`);
                 }
-                catch(e){
-                    WAnode.err(`Error : Too many instructions! Try again.`)
-                }
-            };
-            
-            var WARestart = function(){
+            }
+
+            var WARestart = function() {
                 WAClose();
                 WAConnect();
             }
-            
-            async function connectionSetup(){
+
+            async function connectionSetup() {
                 try {
                     whatsappConnectionStatus = await client.getState();
-                    if(whatsappConnectionStatus === "CONNECTED"){
+                    if (whatsappConnectionStatus === "CONNECTED") {
                         clearInterval(WAnode.connectionSetupID);
-                    }
-                    else {
+                    } else {
                         WAnode.log(`Status : Connecting to Whatsapp...`);
                     }
-                }
-                catch(e){
+                } catch (e) {
                     WAnode.log(`Error : Waiting for Initializion...`);
                 }
             };
-            WAnode.connectionSetupID = setInterval(connectionSetup, 10000); 
+            WAnode.connectionSetupID = setInterval(connectionSetup, 10000);
 
-            //QR-Code on Terminal and Ready Status. 
-            client.on(`qr`, (qr)=>{
+            //QR-Code on Terminal and Ready Status.
+            client.on(`qr`, (qr) => {
                 // clearInterval(WAnode.connectionSetupID);
-                QRCode.toString(qr, {type : 'terminal', small:true }, function(err, QRTerminal){
-                    WAnode.log(`To Connect, Scan the QR Code through your Whatsapp Mobile App.`)
+                QRCode.toString(qr, { type: 'terminal', small: true }, function(err, QRTerminal) {
+                    WAnode.log(`To Connect, Scan the QR Code through your Whatsapp Mobile App.`);
                     console.log("");
                     console.log(QRTerminal);
                 });
             });
 
-            client.on(`ready`, ()=>{
+            client.on(`ready`, () => {
                 WAnode.log(`Status : Whatsapp Connected`);
                 pressenceUpdate(onlineStatus);
             });
@@ -110,20 +135,20 @@ module.exports = function(RED) {
             client.WAClose = WAClose;
             client.clientType = clientType;
             WAnode.client = client;
-        };
+        }
 
-        if (clientType === "waSocketClient"){
+        if (clientType === "waSocketClient") {
             const makeWASocket = require('@whiskeysockets/baileys');
             const { useMultiFileAuthState } = makeWASocket;
             const pino = require('pino');
-            
+
             async function connectSocketClient() {
                 const { state, saveCreds } = await useMultiFileAuthState(whatsappLinkDirSocket);
                 // const loggerFile = pino.destination(whatsappLinkDirSocketLogs);
                 const socketClient = makeWASocket.default({
                     printQRInTerminal: false,
-                    logger:pino({level: "silent"}),
-                    auth : state,
+                    logger: pino({ level: "silent" }),
+                    auth: state,
                     browser: ["Node-RED", "Chrome", "4.0.0"],
                     markOnlineOnConnect: onlineStatus,
                     patchMessageBeforeSending: (message) => {
@@ -144,23 +169,14 @@ module.exports = function(RED) {
                             };
                         }
                         return message;
-                        },
-                })
+                    },
+                });
 
                 socketClient.ev.on('creds.update', saveCreds);
-            
-                socketClient.ev.on('connection.update', (update) => {
-                    const { connection, lastDisconnect } = update
-                    if (connection === 'close') {
-                        // reconnect if not logged out
 
-                        // console.log(lastDisconnect, lastDisconnect?.error?.data?.content)
-                        // if (lastDisconnect.error.output.statusCode === 401 ||
-                        //     lastDisconnect.error.output.statusCode === 440){
-                        //         console.log(`logged Out by User. StatusCode : ${lastDisconnect?.error?.output.statusCode}`)
-                        //         FS.rmSync(whatsappLinkDirSocket, {recursive : true, force: true})
-                        // }
-                        // connectSocketClient();
+                socketClient.ev.on('connection.update', (update) => {
+                    const { connection, lastDisconnect } = update;
+                    if (connection === 'close') {
                         if (
                             lastDisconnect &&
                             lastDisconnect.error &&
@@ -178,74 +194,70 @@ module.exports = function(RED) {
                                 lastDisconnect.error.output.statusCode === 401 &&
                                 lastDisconnect.error.output.statusCode === 440
                             ) {
-                                FS.rmSync(whatsappLinkDirSocket, {recursive : true, force: true})
-                                connectSocketClient()
+                                FS.rmSync(whatsappLinkDirSocket, { recursive: true, force: true });
+                                connectSocketClient();
                             } else {
-                                WAnode.log(`ErrorCode: ${lastDisconnect?.error?.output.statusCode} | ${lastDisconnect?.error}`)
+                                WAnode.log(`ErrorCode: ${lastDisconnect?.error?.output.statusCode} | ${lastDisconnect?.error}`);
                             }
                         }
                     }
-                })              
-                return socketClient
+                });
+                return socketClient;
             };
             client = connectSocketClient();
             client.onlineStatus = onlineStatus;
             client.clientType = clientType;
             client.clientStartFunction = connectSocketClient;
-            WAnode.client = client
-        };
-        
-        async function loopStatusUpdate(){
-          try {
-            if (clientType === "waSocketClient"){
-                let myClient = await WAnode.client;
-                let id = myClient.user.id;
-                await myClient.sendPresenceUpdate("available", id)
-                if (!onlineStatus) {
-                    setTimeout(()=> {
-                        myClient.sendPresenceUpdate("unavailable", id)
-                    },17000)
-                };
-            } 
-            else {
-                await WAnode.client.sendPresenceAvailable();
-                if (!onlineStatus) {
-                    setTimeout(()=> {
-                        WAnode.client.sendPresenceUnavailable();
-                    },17000)
-                };
-            }}
-            catch(e){
-                WAnode.error("Error in whatsapp Ping.")
+            WAnode.client = client;
+        }
+
+        async function loopStatusUpdate() {
+            try {
+                if (clientType === "waSocketClient") {
+                    let myClient = await WAnode.client;
+                    let id = myClient.user.id;
+                    await myClient.sendPresenceUpdate("available", id);
+                    if (!onlineStatus) {
+                        setTimeout(() => {
+                            myClient.sendPresenceUpdate("unavailable", id);
+                        }, 17000);
+                    }
+                } else {
+                    await WAnode.client.sendPresenceAvailable();
+                    if (!onlineStatus) {
+                        setTimeout(() => {
+                            WAnode.client.sendPresenceUnavailable();
+                        }, 17000);
+                    }
+                }
+            } catch (e) {
+                WAnode.error("Error in whatsapp Ping.");
             }
         }
-  
-        var loopStatusUpdateID = setInterval(()=> {
+
+        var loopStatusUpdateID = setInterval(() => {
             loopStatusUpdate();
-        }, loopTime)
-        
-        this.on('close', (removed, done)=>{
+        }, loopTime);
+
+        this.on('close', (removed, done) => {
             clearInterval(loopStatusUpdateID);
-            if(removed){
-                if(clientType === "waWebClient"){
+            if (removed) {
+                if (clientType === "waWebClient") {
                     clearInterval(WAnode.connectionSetupID);
                     WAnode.client.WAClose();
                 } else {
-                    // WAnode.client.removeAllListeners();
                     WAnode.client.end();
                 }
-
-            }
-            else {
-                if(clientType === "waWebClient"){
+            } else {
+                if (clientType === "waWebClient") {
                     clearInterval(WAnode.connectionSetupID);
                     WAnode.client.WAClose();
-                } else { WAnode.client.end() }
+                } else {
+                    WAnode.client.end();
+                }
             }
             done();
-
         });
-       
     }
-    RED.nodes.registerType("whatsappLink",RemoteClientNode);
+    RED.nodes.registerType("whatsappLink", RemoteClientNode);
 }
