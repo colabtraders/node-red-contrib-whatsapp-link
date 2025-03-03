@@ -19,6 +19,7 @@
                         options: [
                             { value: "waSocketClient", label: "Whatsapp Lite"},
                             { value: "waWebClient", label: "Whatsapp Web"},
+                            { value: "waRemoteClient", label: "Remote WppWeb (Puppeteer Remoto)"}
                         ]
                     }
                 ]
@@ -47,5 +48,10 @@
         <label ><i class="fa fa-cog"></i> Ping Whatsapp to avoid sleep every : 
             <input type="text" placeholder="05" id="node-config-input-loopTime" style="width: 15%;"> hr.
         </label>
+    </div>
+
+    <div class="form-row remote-config">
+        <label for="node-input-remoteUrl"><i class="fa fa-link"></i> URL do Whatsapp Remoto</label>
+        <input type="text" id="node-input-remoteUrl" placeholder="ws://ip:port/devtools/browser/...">
     </div>
 </script>
